@@ -1,13 +1,14 @@
-# LAW — Architectural & Operational Invariants of `podmesh-windows-mount` (v2.4.0)
+# LAW — `podmesh-windows-mount` (v2.4.1)
 
-1. **Kernel FUSE Equivalence via WinFsp**:
-   - Under Windows 11 / Windows Server, filesystem mounting MUST operate through the signed kernel driver **WinFsp** (`WinFsp.Launcher` service) paired with the VFS caching dispatcher (`--vfs-cache-mode=full` and `--s3-force-path-style=true`).
-2. **Windows Interactive Session Token Visibility (`Session 1` vs `Session 0`)**:
-   - Windows isolates drive letters per Logon Session (`\Sessions\<ID>\DosDevices`). A drive mounted inside an elevated SSH session (`Session 0`) is invisible to the graphical desktop shell (`explorer.exe` in `Session 1`).
-   - Therefore, persistent desktop mounts MUST be registered under the interactive user token (`/RU "<user>" /IT /RL LIMITED /SC ONLOGON`) via `scripts/run-hidden.vbs` so that both the user desktop (`Ce PC > MeshFS-CAS (Z:)`) and user applications see the volume immediately on boot.
-3. **Language-Independent Windows Security Identifiers (SID)**:
-   - Provisioning scripts MUST never hardcode localized group names (`Administrators` vs `Administrateurs`). All ACL operations (`icacls.exe`) MUST use universal well-known SIDs: `*S-1-5-32-544` (Administrators) and `*S-1-5-18` (`NT AUTHORITY\SYSTEM`).
-4. **Deterministic Auto-Logon & Zero-Sleep Test Readiness**:
-   - On autonomous Windows test nodes (`LOGOSTEST`), `DevicePasswordLessBuildVersion` MUST be set to `0` alongside `AutoAdminLogon=1`, `NoLockScreen=1`, and all `powercfg` timeouts set to `0`.
-5. **Bounded Retry & Fail-Closed Health Check (Rule 38)**:
-   - `podmesh-windows-mount.exe status <endpoint>` queries `/healthz` with a strict timeout and returns deterministic exit codes (`0` healthy, non-zero on unreachable gateway).
+## Non-Negotiable Invariants
+
+1. **Userland-First Default (`install-userland` / `daemon`)**:
+   - By default, the FUSE drive (`Z:\`) MUST be mounted in **Pure Userland** inside the user's interactive session (`Session 1`, `/RL LIMITED`) without requiring `SYSTEM` or Administrator privilege escalation at runtime.
+2. **Explicit Under-the-Hood Global Mode (`install-global` / `--global`)**:
+   - Because Windows NT isolates userland DOS devices (`\Sessions\0\DosDevices\<LUID>\Z:`) from `Session 0` (`sshd` / services), `podmesh-windows-mount` keeps under the hood an explicit **Global Mode (`install-global`)** (`SYSTEM` + `-o FileSecurity=D:P(A;;FA;;;WD)` -> `\GLOBAL??\Z:`) for when an AI Agent over SSH (`Session 0`) or a system service requires direct access to `Z:\` alongside `explorer.exe`.
+3. **Native Windowless Supervision (`CREATE_NO_WINDOW`)**:
+   - Background execution MUST use native Win32 process creation flags (`CREATE_NO_WINDOW = 0x08000000`) and a built-in Rust watchdog loop (`supervise`), with zero reliance on fragile `.vbs` wrappers.
+4. **Graceful Cache Drain Before Unmount**:
+   - Unmounting (`unmount`) MUST verify that the VFS writeback cache (`127.0.0.1:5572/vfs/stats`) has `uploadsInProgress == 0` and `uploadsQueued == 0` before calling `core/quit`, preventing silent truncation of in-flight 4 MiB CAS chunks.
+5. **Single SPICE Guest Agent Service (`spice-agent`)**:
+   - On Proxmox VE Windows 11 guests using `vga: qxl`, `tablet: 1` MUST be enabled on the hypervisor and only the modern `spice-agent` service may own `\\.\Global\com.redhat.spice.0` (legacy `vdservice` must be removed).

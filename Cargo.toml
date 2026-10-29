@@ -1,14 +1,17 @@
 [package]
 name = "podmesh-windows-mount"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2021"
-authors = ["Xavier de Poorter <xavier@xavdp.pro>"]
-description = "PodMesh Windows Native FUSE Drive Mount Utility (WinFsp + 4 MiB CAS MeshFS Gateway)"
-license = "AGPL-3.0-or-later"
-repository = "https://github.com/xavdp-pro/podmesh-windows-mount"
+description = "PodMesh Windows Native Drive Mount Utility (Z:\\) via WinFsp FUSE & 4MB CAS (Userland-First + Optional Global Mode)"
+license = "Apache-2.0"
+authors = ["Xavier <xavdp-pro>"]
+
+[[bin]]
+name = "podmesh-windows-mount"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
 lto = true
-codegen-units = 1
 strip = true
+panic = "abort"
