@@ -83,22 +83,37 @@ fn is_stop_requested(drive: &str) -> bool {
     stop_sentinel_path(drive).exists() || global_stop_sentinel_path(drive).exists()
 }
 
+fn default_endpoint() -> String {
+    env::var("PODMESH_S3_ENDPOINT")
+        .or_else(|_| env::var("MESHFS_S3_ENDPOINT"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:9000".to_string())
+}
+
+fn default_bucket() -> String {
+    env::var("PODMESH_S3_BUCKET")
+        .or_else(|_| env::var("MESHFS_S3_BUCKET"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "meshfs-default".to_string())
+}
+
 fn build_rclone_args(
     drive: &str,
     endpoint: &str,
     bucket: &str,
-    access_key: &str,
-    secret_key: &str,
     is_global: bool,
 ) -> Vec<String> {
+    // Note: S3 credentials are passed exclusively via environment variables
+    // (RCLONE_S3_ACCESS_KEY_ID and RCLONE_S3_SECRET_ACCESS_KEY) to prevent
+    // secret exposure in process command-line arguments (Win32_Process / ps).
     let mut args = vec![
         "mount".to_string(),
         format!(":s3:{}", bucket),
         drive.to_string(),
         "--s3-provider=Other".to_string(),
         format!("--s3-endpoint={}", endpoint),
-        format!("--s3-access-key-id={}", access_key),
-        format!("--s3-secret-access-key={}", secret_key),
         "--s3-force-path-style=true".to_string(),
         "--s3-no-check-bucket".to_string(),
         "--s3-chunk-size=8M".to_string(),
@@ -138,21 +153,23 @@ fn find_self_bin() -> String {
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().collect();
-    let is_global = raw_args.iter().any(|a| a == "--global" || a == "-g");
+    let is_global = raw_args
+        .iter()
+        .any(|a| a == "--global" || a == "-g" || a == "--global-admin");
     let args: Vec<String> = raw_args
         .into_iter()
-        .filter(|a| a != "--global" && a != "-g")
+        .filter(|a| a != "--global" && a != "-g" && a != "--global-admin")
         .collect();
 
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
         print_banner();
-        println!("Usage: podmesh-windows-mount.exe <COMMAND> [DRIVE] [ENDPOINT] [BUCKET] [--global]");
+        println!("Usage: podmesh-windows-mount.exe <COMMAND> [DRIVE] [ENDPOINT] [BUCKET] [--global|--global-admin]");
         println!();
         println!("Modes de montage :");
         println!("  Par défaut (Recommandé) : Montage PUR USERLAND dans la session interactive");
         println!("                            de l'utilisateur (zéro élévation Administrateur).");
         println!("  Option --global (-g)    : Montage GLOBAL (\\GLOBAL??\\Z:) sous SYSTEM avec");
-        println!("                            -o uid=-1,gid=-1 (visible par sshd Session 0 + GUI).");
+        println!("                            FileSecurity Everyone (visible par sshd Session 0 + GUI).");
         println!();
         println!("Commands:");
         println!("  mount [DRIVE] [ENDPOINT] [BUCKET]            Montage FUSE au premier plan");
@@ -165,18 +182,14 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    let def_ep = default_endpoint();
+    let def_bkt = default_bucket();
     let cmd = args[1].as_str();
     match cmd {
         "mount" | "daemon" | "supervise" => {
             let drive = args.get(2).map(|s| s.as_str()).unwrap_or("Z:");
-            let endpoint = args
-                .get(3)
-                .map(|s| s.as_str())
-                .unwrap_or("http://192.168.10.179:9000");
-            let bucket = args
-                .get(4)
-                .map(|s| s.as_str())
-                .unwrap_or("truenas-backup");
+            let endpoint = args.get(3).map(|s| s.as_str()).unwrap_or(def_ep.as_str());
+            let bucket = args.get(4).map(|s| s.as_str()).unwrap_or(def_bkt.as_str());
             let (access_key, secret_key) = load_credentials();
 
             clear_stop_sentinels(drive);
@@ -233,8 +246,7 @@ fn main() -> ExitCode {
             }
 
             let rclone_bin = find_rclone_bin();
-            let rclone_args =
-                build_rclone_args(drive, endpoint, bucket, &access_key, &secret_key, is_global);
+            let rclone_args = build_rclone_args(drive, endpoint, bucket, is_global);
 
             if cmd == "mount" {
                 print_banner();
@@ -244,12 +256,17 @@ fn main() -> ExitCode {
                 println!(
                     "Espace de noms NT   : {}",
                     if is_global {
-                        "GLOBAL (-o uid=-1,gid=-1)"
+                        "GLOBAL (FileSecurity Everyone)"
                     } else {
                         "USERLAND (Session locale)"
                     }
                 );
-                match Command::new(rclone_bin).args(&rclone_args).status() {
+                match Command::new(rclone_bin)
+                    .args(&rclone_args)
+                    .env("RCLONE_S3_ACCESS_KEY_ID", &access_key)
+                    .env("RCLONE_S3_SECRET_ACCESS_KEY", &secret_key)
+                    .status()
+                {
                     Ok(s) => {
                         println!("[+] Processus de montage terminé : {}", s);
                         ExitCode::SUCCESS
@@ -269,6 +286,8 @@ fn main() -> ExitCode {
                     let mut child_cmd = Command::new(rclone_bin);
                     child_cmd
                         .args(&rclone_args)
+                        .env("RCLONE_S3_ACCESS_KEY_ID", &access_key)
+                        .env("RCLONE_S3_SECRET_ACCESS_KEY", &secret_key)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null());
@@ -356,15 +375,9 @@ fn main() -> ExitCode {
         "install-userland" => {
             print_banner();
             let drive = args.get(2).map(|s| s.as_str()).unwrap_or("Z:");
-            let endpoint = args
-                .get(3)
-                .map(|s| s.as_str())
-                .unwrap_or("http://192.168.10.179:9000");
-            let bucket = args
-                .get(4)
-                .map(|s| s.as_str())
-                .unwrap_or("truenas-backup");
-            let user = env::var("USERNAME").unwrap_or_else(|_| "logos".to_string());
+            let endpoint = args.get(3).map(|s| s.as_str()).unwrap_or(def_ep.as_str());
+            let bucket = args.get(4).map(|s| s.as_str()).unwrap_or(def_bkt.as_str());
+            let user = env::var("USERNAME").unwrap_or_else(|_| "User".to_string());
             let self_bin = find_self_bin();
             let tr = format!("\"{}\" daemon {} {} {}", self_bin, drive, endpoint, bucket);
 
@@ -403,14 +416,8 @@ fn main() -> ExitCode {
         "install-global" => {
             print_banner();
             let drive = args.get(2).map(|s| s.as_str()).unwrap_or("Z:");
-            let endpoint = args
-                .get(3)
-                .map(|s| s.as_str())
-                .unwrap_or("http://192.168.10.179:9000");
-            let bucket = args
-                .get(4)
-                .map(|s| s.as_str())
-                .unwrap_or("truenas-backup");
+            let endpoint = args.get(3).map(|s| s.as_str()).unwrap_or(def_ep.as_str());
+            let bucket = args.get(4).map(|s| s.as_str()).unwrap_or(def_bkt.as_str());
             let self_bin = find_self_bin();
             let tr = format!(
                 "\"{}\" supervise {} {} {} --global",
@@ -448,10 +455,7 @@ fn main() -> ExitCode {
         }
         "status" => {
             print_banner();
-            let endpoint = args
-                .get(2)
-                .map(|s| s.as_str())
-                .unwrap_or("http://192.168.10.179:9000");
+            let endpoint = args.get(2).map(|s| s.as_str()).unwrap_or(def_ep.as_str());
             println!(
                 "[*] Test de joignabilité de MeshFS Gateway à {}/healthz...",
                 endpoint
@@ -471,5 +475,24 @@ fn main() -> ExitCode {
             eprintln!("[-] Commande inconnue : {}", other);
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rclone_args_never_expose_secrets_in_argv() {
+        let args = build_rclone_args("Z:", "http://127.0.0.1:9000", "meshfs-default", true);
+        assert!(args.iter().all(|a| !a.contains("secret-access-key")));
+        assert!(args.iter().all(|a| !a.contains("access-key-id")));
+        assert!(args.contains(&"FileSecurity=D:P(A;;FA;;;WD)".to_string()));
+    }
+
+    #[test]
+    fn test_default_endpoint_is_infrastructure_agnostic() {
+        let ep = default_endpoint();
+        assert!(!ep.contains("192.168.10."));
     }
 }
